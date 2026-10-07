@@ -89,7 +89,8 @@ header h1 { font: 700 18px/1.2 var(--font-display); margin: 0; letter-spacing: -
 .chart-head { display: flex; justify-content: space-between; align-items: baseline; padding-inline: 4px; }
 .chart-head h2 { font: 600 14px var(--font-body); margin: 0; }
 .chart-head span { font: 12px var(--font-data); color: var(--muted); }
-canvas { display: block; width: 100%; height: 200px; }
+canvas { display: block; width: 100%; height: 220px; touch-action: pan-y; cursor: crosshair; }
+.chart-hint { font: 11px var(--font-data); color: var(--muted); padding: 2px 4px 0; }
 
 .stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
 .stat { padding: 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); min-width: 0; }
@@ -155,6 +156,7 @@ canvas { display: block; width: 100%; height: 200px; }
   <section class="chart-card">
     <div class="chart-head"><h2 id="chart-title">Last 30 minutes</h2><span id="chart-peak">peak –</span></div>
     <canvas id="chart" aria-label="Power use over time"></canvas>
+    <div class="chart-hint">Touch and drag the chart to see exact times and values.</div>
   </section>
 
   <section class="stats">
@@ -163,7 +165,7 @@ canvas { display: block; width: 100%; height: 200px; }
     <div class="stat"><div class="k">Meter</div><div class="v" id="meter-read">–<small>kWh</small></div></div>
   </section>
 
-  <p class="foot">Updates every 30 seconds while this screen is open.<br><span id="version">Version 1.5</span></p>
+  <p class="foot">Updates every 30 seconds while this screen is open.<br><span id="version">Version 1.6</span></p>
 </main>
 
 <div class="sheet-wrap" id="sheet" hidden>
@@ -193,7 +195,7 @@ canvas { display: block; width: 100%; height: 200px; }
 (() => {
   const GQL = 'https://api.octopus.energy/v1/graphql/';
   const REST = 'https://api.octopus.energy/v1';
-  const VERSION = '1.5';
+  const VERSION = '1.6';
   const POLL_MS = 30_000;
   const WINDOW_MS = 30 * 60_000;
 
@@ -435,8 +437,22 @@ canvas { display: block; width: 100%; height: 200px; }
       g.fillText(v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : Math.round(v), padL - 6, yy);
     }
     g.textAlign = 'center'; g.textBaseline = 'alphabetic';
-    const fmt = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-    g.fillText(fmt(t0), padL + 14, H - 4); g.fillText(fmt(t1), W - padR - 16, H - 4);
+    const span = t1 - t0;
+    const steps = [1, 2, 5, 10, 15, 30, 60, 120, 180, 360, 720, 1440].map(m => m * 60_000);
+    const step = steps.find(st => span / st <= 6) || steps.at(-1);
+    const multiDay = span > 20 * 3600_000;
+    const tickLabel = t => {
+      const d = new Date(t), hm = clock(t);
+      return multiDay && d.getHours() === 0 && d.getMinutes() === 0 ? d.toLocaleDateString([], { weekday: 'short' }) : hm;
+    };
+    const tz = new Date(t0).getTimezoneOffset() * 60_000;
+    for (let t = Math.ceil((t0 - tz) / step) * step + tz; t <= t1; t += step) {
+      const xx = Math.round(x(t)) + .5;
+      g.strokeStyle = line; g.beginPath(); g.moveTo(xx, H - padB); g.lineTo(xx, H - padB + 4); g.stroke();
+      const label = tickLabel(t), half = g.measureText(label).width / 2;
+      if (xx - half < padL - 6 || xx + half > W) continue;
+      g.fillStyle = muted; g.fillText(label, xx, H - 4);
+    }
 
     const grad = g.createLinearGradient(0, padT, 0, H - padB);
     grad.addColorStop(0, cssVar('--accent-soft')); grad.addColorStop(1, 'rgba(0,0,0,0)');
@@ -450,8 +466,57 @@ canvas { display: block; width: 100%; height: 200px; }
     const last = pts.at(-1);
     g.beginPath(); g.arc(x(last.t), y(last.w), 4, 0, Math.PI * 2); g.fillStyle = accent; g.fill();
 
-    $('chart-peak').textContent = 'peak ' + (peak >= 1000 ? (peak / 1000).toFixed(2) + ' kW' : Math.round(peak) + ' W');
+    $('chart-peak').textContent = 'peak ' + fmtW(peak);
+    s.geom = { padL, padR, padT, padB, W, H, t0, t1 };
+
+    // Crosshair: vertical line with the time and value at that point
+    if (s.cursorT != null) {
+      const p = nearest(pts, Math.min(t1, Math.max(t0, s.cursorT)));
+      const cx = Math.round(x(p.t)) + .5, cy = y(p.w);
+      g.strokeStyle = cssVar('--fg'); g.globalAlpha = .55; g.lineWidth = 1;
+      g.beginPath(); g.moveTo(cx, padT); g.lineTo(cx, H - padB); g.stroke(); g.globalAlpha = 1;
+      g.beginPath(); g.arc(cx, cy, 5, 0, Math.PI * 2); g.fillStyle = accent; g.fill();
+      g.lineWidth = 2; g.strokeStyle = cssVar('--surface'); g.stroke();
+
+      const halfHourly = s.mode === 'halfhour' || s.mode === 'waiting';
+      const d = new Date(p.t);
+      const when = (multiDay ? d.toLocaleDateString([], { weekday: 'short' }) + ' ' : '') +
+        (halfHourly ? clock(p.t) + '–' + clock(p.t + 1800_000) : d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hourCycle: 'h23' }));
+      const val = fmtW(p.w) + (halfHourly ? ' avg' : '');
+      g.font = `600 13px ${cssVar('--font-body')}`; const w1 = g.measureText(val).width;
+      g.font = `11px ${cssVar('--font-data')}`; const w2 = g.measureText(when).width;
+      const bw = Math.max(w1, w2) + 16, bh = 40;
+      let bx = cx + 10; if (bx + bw > W - 2) bx = cx - 10 - bw;
+      const by = padT;
+      g.fillStyle = cssVar('--bg'); g.strokeStyle = cssVar('--line'); g.lineWidth = 1;
+      g.beginPath(); g.roundRect ? g.roundRect(bx, by, bw, bh, 8) : g.rect(bx, by, bw, bh); g.fill(); g.stroke();
+      g.textAlign = 'left'; g.textBaseline = 'alphabetic';
+      g.fillStyle = cssVar('--fg'); g.font = `600 13px ${cssVar('--font-body')}`; g.fillText(val, bx + 8, by + 17);
+      g.fillStyle = muted; g.font = `11px ${cssVar('--font-data')}`; g.fillText(when, bx + 8, by + 32);
+    }
   }
+  function clock(t) { return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }); }
+  function fmtW(w) { return w >= 1000 ? (w / 1000).toFixed(2) + ' kW' : Math.round(w) + ' W'; }
+  function nearest(pts, t) {
+    let lo = 0, hi = pts.length - 1;
+    while (hi - lo > 1) { const mid = (lo + hi) >> 1; if (pts[mid].t < t) lo = mid; else hi = mid; }
+    return Math.abs(pts[lo].t - t) <= Math.abs(pts[hi].t - t) ? pts[lo] : pts[hi];
+  }
+
+  // Touch or drag on the chart to move the crosshair; tap elsewhere to hide it
+  (() => {
+    const c = $('chart');
+    const move = e => {
+      const gm = s.geom; if (!gm || s.points.length < 2) return;
+      const r = c.getBoundingClientRect();
+      const frac = (e.clientX - r.left - gm.padL) / (gm.W - gm.padL - gm.padR);
+      s.cursorT = gm.t0 + Math.min(1, Math.max(0, frac)) * (gm.t1 - gm.t0);
+      draw();
+    };
+    c.addEventListener('pointerdown', e => { c.setPointerCapture?.(e.pointerId); move(e); });
+    c.addEventListener('pointermove', e => { if (e.buttons || e.pointerType !== 'mouse' || s.cursorT != null) move(e); });
+    document.addEventListener('pointerdown', e => { if (e.target !== c && s.cursorT != null) { s.cursorT = null; draw(); } });
+  })();
   function niceMax(v) {
     const steps = [500, 1000, 2000, 3000, 4000, 5000, 8000, 10000, 15000, 20000];
     return steps.find(s => s >= v * 1.1) || Math.ceil(v * 1.1 / 5000) * 5000;
@@ -501,7 +566,7 @@ canvas { display: block; width: 100%; height: 200px; }
   }
 
   function clearDisplay() {
-    s.points = [];
+    s.points = []; s.cursorT = null;
     $('watts').textContent = '–'; $('watts-unit').textContent = 'W';
     $('read-at').textContent = '–'; $('chart-peak').textContent = 'peak –';
     $('hero-label').textContent = 'Using right now';
