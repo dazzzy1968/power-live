@@ -1,0 +1,526 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="theme-color" content="#0f1522">
+<title>Home Power Live</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
+<style>
+/* Layout: one-screen phone dashboard. Live wattage up top, rolling chart, today's totals, settings sheet. */
+:root {
+  --bg: #f3f5f8;
+  --surface: #ffffff;
+  --fg: #141b29;
+  --muted: #5d687c;
+  --line: #dfe4ec;
+  --accent: #0f8a7e;        /* live / electricity */
+  --accent-soft: rgba(15, 138, 126, .14);
+  --warn: #b26a00;
+  --bad: #c2362f;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "IBM Plex Sans", system-ui, -apple-system, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0f1522; --surface: #172032; --fg: #e8edf5; --muted: #8e9ab0; --line: #26324a;
+    --accent: #3fd1bf; --accent-soft: rgba(63, 209, 191, .16); --warn: #f0b04a; --bad: #ff7a70;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0f1522; --surface: #172032; --fg: #e8edf5; --muted: #8e9ab0; --line: #26324a;
+  --accent: #3fd1bf; --accent-soft: rgba(63, 209, 191, .16); --warn: #f0b04a; --bad: #ff7a70;
+  color-scheme: dark;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+html { padding-top: env(safe-area-inset-top, 0px); padding-bottom: env(safe-area-inset-bottom, 0px); background: var(--bg); }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font: 15px/1.45 var(--font-body);
+  padding-inline: 16px; padding-block: 12px 24px;
+  -webkit-font-smoothing: antialiased;
+}
+[hidden] { display: none !important; }
+main { max-width: 520px; margin: 0 auto; display: flex; flex-direction: column; gap: 16px; }
+
+header { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+header h1 { font: 700 18px/1.2 var(--font-display); margin: 0; letter-spacing: -.01em; }
+.icon-btn {
+  appearance: none; border: 1px solid var(--line); background: var(--surface); color: var(--fg);
+  border-radius: 10px; padding: 8px 12px; font: 500 14px var(--font-body); cursor: pointer;
+}
+.icon-btn:focus-visible, button:focus-visible, input:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px; font: 500 12px var(--font-data);
+  text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+}
+.pill .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+.pill[data-state="live"] { color: var(--accent); }
+.pill[data-state="live"] .dot { background: var(--accent); animation: pulse 2s ease-in-out infinite; }
+.pill[data-state="demo"] { color: var(--warn); } .pill[data-state="demo"] .dot { background: var(--warn); }
+.pill[data-state="error"] { color: var(--bad); } .pill[data-state="error"] .dot { background: var(--bad); }
+.pill[data-state="halfhour"] { color: var(--warn); } .pill[data-state="halfhour"] .dot { background: var(--warn); }
+@keyframes pulse { 50% { opacity: .35; } }
+@media (prefers-reduced-motion: reduce) { .pill .dot { animation: none !important; } }
+
+.hero { display: flex; flex-direction: column; gap: 4px; padding-top: 8px; }
+.hero .label { font: 500 12px var(--font-data); text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
+.watts { display: flex; align-items: baseline; gap: 8px; }
+.watts .num { font: 700 clamp(64px, 22vw, 104px)/1 var(--font-display); letter-spacing: -.04em; font-variant-numeric: tabular-nums; }
+.watts .unit { font: 500 22px var(--font-display); color: var(--muted); }
+.meta-row { display: flex; flex-wrap: wrap; gap: 6px 16px; align-items: center; color: var(--muted); font: 13px var(--font-data); }
+.countdown { display: inline-flex; align-items: center; gap: 6px; }
+.countdown svg { width: 16px; height: 16px; transform: rotate(-90deg); }
+.countdown circle { fill: none; stroke-width: 3; }
+.countdown .track { stroke: var(--line); }
+.countdown .prog { stroke: var(--accent); stroke-linecap: round; transition: stroke-dashoffset 1s linear; }
+
+.chart-card { background: var(--surface); border: 1px solid var(--line); border-radius: 16px; padding: 14px 12px 8px; }
+.chart-head { display: flex; justify-content: space-between; align-items: baseline; padding-inline: 4px; }
+.chart-head h2 { font: 600 14px var(--font-body); margin: 0; }
+.chart-head span { font: 12px var(--font-data); color: var(--muted); }
+canvas { display: block; width: 100%; height: 200px; }
+
+.stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+.stat { padding: 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); min-width: 0; }
+.stat .k { font: 500 11px var(--font-data); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
+.stat .v { font: 600 20px var(--font-display); font-variant-numeric: tabular-nums; margin-top: 2px; overflow-wrap: anywhere; }
+.stat .v small { font: 500 12px var(--font-body); color: var(--muted); margin-left: 2px; }
+
+.notice { font-size: 14px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); }
+.notice.warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
+.notice.err { border-color: color-mix(in srgb, var(--bad) 50%, var(--line)); }
+.notice b { font-weight: 600; }
+
+/* Settings sheet */
+.sheet-wrap { position: fixed; inset: 0; background: rgba(5, 10, 20, .45); display: flex; align-items: flex-end; justify-content: center; z-index: 10; }
+.sheet {
+  background: var(--surface); color: var(--fg); width: 100%; max-width: 520px;
+  border-radius: 18px 18px 0 0; padding: 20px 16px calc(20px + env(safe-area-inset-bottom, 0px));
+  display: flex; flex-direction: column; gap: 14px; max-height: 92%; overflow-y: auto;
+}
+.sheet h2 { font: 700 20px var(--font-display); margin: 0; }
+.sheet p { margin: 0; color: var(--muted); font-size: 14px; }
+.field { display: flex; flex-direction: column; gap: 6px; }
+.field label { font: 600 13px var(--font-body); }
+.field input {
+  font: 15px var(--font-data); padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+  background: var(--bg); color: var(--fg); width: 100%;
+}
+.field .hint { font-size: 12px; color: var(--muted); }
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; }
+.btn { appearance: none; border: 0; border-radius: 10px; padding: 12px 16px; font: 600 15px var(--font-body); cursor: pointer; }
+.btn.primary { background: var(--accent); color: var(--bg); flex: 1; }
+.btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
+.btn.danger { background: transparent; color: var(--bad); border: 1px solid var(--line); }
+.foot { color: var(--muted); font-size: 12px; text-align: center; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Home Power Live</h1>
+    <button class="icon-btn" id="open-settings" type="button">Settings</button>
+  </header>
+
+  <section class="hero" aria-live="polite">
+    <span class="label">Using right now</span>
+    <div class="watts"><span class="num" id="watts">–</span><span class="unit" id="watts-unit">W</span></div>
+    <div class="meta-row">
+      <span class="pill" id="status" data-state="demo"><span class="dot"></span><span id="status-text">Demo data</span></span>
+      <span id="read-at">–</span>
+      <span class="countdown" id="countdown">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle class="track" cx="10" cy="10" r="8"></circle><circle class="prog" id="ring" cx="10" cy="10" r="8" stroke-dasharray="50.27" stroke-dashoffset="0"></circle></svg>
+        <span id="next">next in 30s</span>
+      </span>
+    </div>
+  </section>
+
+  <div class="notice warn" id="notice" hidden></div>
+
+  <section class="chart-card">
+    <div class="chart-head"><h2 id="chart-title">Last 30 minutes</h2><span id="chart-peak">peak –</span></div>
+    <canvas id="chart" aria-label="Power use over time"></canvas>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><div class="k">Today</div><div class="v" id="today-kwh">–<small>kWh</small></div></div>
+    <div class="stat"><div class="k">Avg 30 min</div><div class="v" id="avg">–<small>W</small></div></div>
+    <div class="stat"><div class="k">Meter</div><div class="v" id="meter-read">–<small>kWh</small></div></div>
+  </section>
+
+  <p class="foot">Updates every 30 seconds while this screen is open.</p>
+</main>
+
+<div class="sheet-wrap" id="sheet" hidden>
+  <form class="sheet" id="settings-form" autocomplete="off">
+    <h2>Connect your Octopus account</h2>
+    <p>Your API key is saved only on this phone and sent only to api.octopus.energy. Find it at octopus.energy → Account → Personal details → API access.</p>
+    <div class="field">
+      <label for="api-key">API key</label>
+      <input id="api-key" type="password" placeholder="sk_live_…" spellcheck="false" autocapitalize="off" required>
+    </div>
+    <div class="field">
+      <label for="account">Account number (optional)</label>
+      <input id="account" type="text" placeholder="A-1234ABCD" spellcheck="false" autocapitalize="characters">
+      <span class="hint">Leave blank and the app finds it for you.</span>
+    </div>
+    <div class="btn-row">
+      <button class="btn primary" type="submit" id="save">Save and connect</button>
+      <button class="btn ghost" type="button" id="close-settings">Close</button>
+    </div>
+    <button class="btn danger" type="button" id="forget">Forget key and show demo</button>
+  </form>
+</div>
+
+<script>
+(() => {
+  const GQL = 'https://api.octopus.energy/v1/graphql/';
+  const REST = 'https://api.octopus.energy/v1';
+  const POLL_MS = 30_000;
+  const WINDOW_MS = 30 * 60_000;
+
+  const $ = id => document.getElementById(id);
+  const store = {
+    get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+    set(k, v) { try { localStorage.setItem(k, v); } catch {} },
+    del(k) { try { localStorage.removeItem(k); } catch {} },
+  };
+
+  const s = {
+    key: store.get('hp.key') || '',
+    account: store.get('hp.account') || '',
+    deviceId: null, mpan: null, serial: null,
+    token: null, tokenExp: 0,
+    mode: 'demo',           // demo | live | halfhour | error
+    points: [],             // { t: ms, w: watts }
+    timer: null, nextAt: 0,
+  };
+
+  // ---------- Octopus API ----------
+  async function gql(query, variables = {}, auth = true) {
+    const headers = { 'Content-Type': 'application/json' };
+    if (auth) headers.Authorization = await token();
+    let res;
+    try {
+      res = await fetch(GQL, { method: 'POST', headers, body: JSON.stringify({ query, variables }) });
+    } catch (e) {
+      throw new Error('Could not reach Octopus. Check your connection and try again.');
+    }
+    const json = await res.json().catch(() => ({}));
+    if (json.errors?.length) {
+      const msg = json.errors.map(e => e.message).join('; ');
+      if (/expired|signature/i.test(msg)) s.token = null;
+      throw new Error(msg);
+    }
+    if (!res.ok) throw new Error(`Octopus replied with error ${res.status}.`);
+    return json.data;
+  }
+
+  async function token() {
+    if (s.token && Date.now() < s.tokenExp) return s.token;
+    const d = await gql(
+      `mutation($k: String!) { obtainKrakenToken(input: { APIKey: $k }) { token } }`,
+      { k: s.key }, false);
+    s.token = d.obtainKrakenToken.token;
+    s.tokenExp = Date.now() + 50 * 60_000; // tokens last 60 min
+    return s.token;
+  }
+
+  async function discover() {
+    if (!s.account) {
+      const d = await gql(`query { viewer { accounts { number } } }`);
+      s.account = d.viewer?.accounts?.[0]?.number;
+      if (!s.account) throw new Error('No account found for this API key.');
+      store.set('hp.account', s.account);
+    }
+    const d = await gql(`query($n: String!) {
+      account(accountNumber: $n) {
+        electricityAgreements(active: true) {
+          meterPoint { mpan meters(includeInactive: false) { serialNumber smartDevices { deviceId } } }
+        }
+      }
+    }`, { n: s.account });
+    const agreements = d.account?.electricityAgreements || [];
+    for (const a of agreements) {
+      for (const m of a.meterPoint?.meters || []) {
+        s.mpan ??= a.meterPoint.mpan; s.serial ??= m.serialNumber;
+        const dev = (m.smartDevices || []).find(x => x.deviceId);
+        if (dev) { s.deviceId = dev.deviceId; s.mpan = a.meterPoint.mpan; s.serial = m.serialNumber; return; }
+      }
+    }
+    if (!s.mpan) throw new Error('No active electricity meter found on this account.');
+  }
+
+  const TELEMETRY = `query($d: String!, $s: DateTime, $e: DateTime, $g: TelemetryGrouping) {
+    smartMeterTelemetry(deviceId: $d, start: $s, end: $e, grouping: $g) {
+      readAt demand consumption consumptionDelta
+    }
+  }`;
+
+  function toWatts(r, seconds) {
+    if (r.demand != null && r.demand !== '') return Number(r.demand);
+    if (r.consumptionDelta != null) return Number(r.consumptionDelta) * 3600 / seconds;
+    return null;
+  }
+
+  async function backfill() {
+    const end = new Date(), start = new Date(Date.now() - WINDOW_MS);
+    const d = await gql(TELEMETRY, { d: s.deviceId, s: start.toISOString(), e: end.toISOString(), g: 'TEN_SECONDS' });
+    s.points = (d.smartMeterTelemetry || [])
+      .map(r => ({ t: Date.parse(r.readAt), w: toWatts(r, 10) }))
+      .filter(p => p.w != null && !isNaN(p.t))
+      .sort((a, b) => a.t - b.t);
+  }
+
+  async function pollLive() {
+    const d = await gql(TELEMETRY, { d: s.deviceId });
+    const list = d.smartMeterTelemetry || [];
+    const r = list[list.length - 1];
+    if (!r) throw new Error('Your Home Mini sent no reading. Check it is plugged in and online.');
+    const p = { t: Date.parse(r.readAt), w: toWatts(r, 10) };
+    if (p.w != null && !s.points.some(x => x.t === p.t)) s.points.push(p);
+    trim();
+    showReading(p.w, p.t);
+    if (r.consumption != null) setStat('meter-read', (Number(r.consumption) / 1000).toFixed(1), 'kWh');
+  }
+
+  async function todayTotal() {
+    const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
+    const d = await gql(TELEMETRY, { d: s.deviceId, s: midnight.toISOString(), e: new Date().toISOString(), g: 'THIRTY_MINUTES' });
+    const wh = (d.smartMeterTelemetry || []).reduce((sum, r) => sum + (Number(r.consumptionDelta) || 0), 0);
+    setStat('today-kwh', (wh / 1000).toFixed(2), 'kWh');
+  }
+
+  // Fallback for accounts without a Home Mini: half-hourly smart meter data (arrives with ~1 day delay).
+  async function pollHalfHourly() {
+    const url = `${REST}/electricity-meter-points/${s.mpan}/meters/${s.serial}/consumption/?page_size=96&order_by=-period`;
+    let res;
+    try { res = await fetch(url, { headers: { Authorization: 'Basic ' + btoa(s.key + ':') } }); }
+    catch { throw new Error('Could not reach Octopus. Check your connection and try again.'); }
+    if (!res.ok) throw new Error(`Octopus replied with error ${res.status} for half-hourly data.`);
+    const j = await res.json();
+    const rows = (j.results || []).slice().reverse();
+    s.points = rows.map(r => ({ t: Date.parse(r.interval_start), w: r.consumption * 2000 })); // kWh per 30 min -> average W
+    const last = rows[rows.length - 1];
+    if (last) showReading(last.consumption * 2000, Date.parse(last.interval_start));
+    const lastDay = rows.slice(-48).reduce((a, r) => a + r.consumption, 0);
+    setStat('today-kwh', lastDay.toFixed(2), 'kWh');
+    $('today-kwh').previousElementSibling.textContent = 'Last 24 h';
+  }
+
+  // ---------- Demo data (shown until a key is saved) ----------
+  function demoWatts(t) {
+    const base = 320 + 90 * Math.sin(t / 240_000);
+    const kettle = (Math.floor(t / 600_000) % 3 === 0 && (t % 600_000) < 150_000) ? 2600 : 0;
+    return Math.max(80, Math.round(base + kettle + (Math.random() - .5) * 60));
+  }
+  function startDemo() {
+    s.mode = 'demo';
+    const now = Date.now();
+    s.points = [];
+    for (let t = now - WINDOW_MS; t <= now; t += 10_000) s.points.push({ t, w: demoWatts(t) });
+    showReading(s.points.at(-1).w, now);
+    setStat('today-kwh', '6.84', 'kWh');
+    setStat('meter-read', '18452.3', 'kWh');
+    setStatus('demo', 'Demo data');
+    notice('warn', '<b>These are example figures.</b> Tap Settings and add your Octopus API key to see your own usage.');
+  }
+
+  // ---------- UI ----------
+  function setStatus(state, text) { $('status').dataset.state = state; $('status-text').textContent = text; }
+  function notice(kind, html) {
+    const n = $('notice');
+    if (!html) { n.hidden = true; return; }
+    n.className = 'notice ' + kind; n.innerHTML = html; n.hidden = false;
+  }
+  function setStat(id, value, unit) { $(id).innerHTML = `${value}<small>${unit}</small>`; }
+  function fmtTime(t) { return new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }); }
+
+  function showReading(w, t) {
+    if (w == null || isNaN(w)) return;
+    if (w >= 10_000) { $('watts').textContent = (w / 1000).toFixed(1); $('watts-unit').textContent = 'kW'; }
+    else { $('watts').textContent = Math.round(w).toLocaleString(); $('watts-unit').textContent = 'W'; }
+    const timeLabel = s.mode === 'halfhour'
+      ? 'half hour from ' + new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
+      : 'read ' + fmtTime(t);
+    $('read-at').textContent = timeLabel;
+    const recent = s.points.filter(p => p.t > Date.now() - WINDOW_MS);
+    if (recent.length && s.mode !== 'halfhour') {
+      const avg = recent.reduce((a, p) => a + p.w, 0) / recent.length;
+      setStat('avg', Math.round(avg).toLocaleString(), 'W');
+    }
+    draw();
+  }
+
+  function trim() {
+    const cutoff = Date.now() - WINDOW_MS;
+    s.points = s.points.filter(p => p.t >= cutoff);
+  }
+
+  function cssVar(name) { return getComputedStyle(document.documentElement).getPropertyValue(name).trim(); }
+
+  function draw() {
+    const c = $('chart'), dpr = window.devicePixelRatio || 1;
+    const W = c.clientWidth, H = c.clientHeight;
+    if (!W) return;
+    c.width = W * dpr; c.height = H * dpr;
+    const g = c.getContext('2d'); g.setTransform(dpr, 0, 0, dpr, 0, 0); g.clearRect(0, 0, W, H);
+    const pts = s.points; if (pts.length < 2) return;
+
+    const accent = cssVar('--accent'), line = cssVar('--line'), muted = cssVar('--muted');
+    const padL = 44, padR = 10, padT = 10, padB = 22;
+    const t0 = pts[0].t, t1 = pts.at(-1).t;
+    const peak = Math.max(...pts.map(p => p.w));
+    const max = niceMax(peak);
+    const x = t => padL + (t - t0) / Math.max(1, t1 - t0) * (W - padL - padR);
+    const y = w => padT + (1 - w / max) * (H - padT - padB);
+
+    g.font = `11px ${cssVar('--font-data')}`; g.fillStyle = muted; g.strokeStyle = line; g.lineWidth = 1;
+    g.textAlign = 'right'; g.textBaseline = 'middle';
+    for (let i = 0; i <= 4; i++) {
+      const v = max * i / 4, yy = Math.round(y(v)) + .5;
+      g.beginPath(); g.moveTo(padL, yy); g.lineTo(W - padR, yy); g.stroke();
+      g.fillText(v >= 1000 ? (v / 1000).toFixed(v % 1000 ? 1 : 0) + 'k' : Math.round(v), padL - 6, yy);
+    }
+    g.textAlign = 'center'; g.textBaseline = 'alphabetic';
+    const fmt = t => new Date(t).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+    g.fillText(fmt(t0), padL + 14, H - 4); g.fillText(fmt(t1), W - padR - 16, H - 4);
+
+    const grad = g.createLinearGradient(0, padT, 0, H - padB);
+    grad.addColorStop(0, cssVar('--accent-soft')); grad.addColorStop(1, 'rgba(0,0,0,0)');
+    g.beginPath(); g.moveTo(x(pts[0].t), y(0));
+    pts.forEach(p => g.lineTo(x(p.t), y(p.w)));
+    g.lineTo(x(t1), y(0)); g.closePath(); g.fillStyle = grad; g.fill();
+
+    g.beginPath(); pts.forEach((p, i) => i ? g.lineTo(x(p.t), y(p.w)) : g.moveTo(x(p.t), y(p.w)));
+    g.strokeStyle = accent; g.lineWidth = 2; g.lineJoin = 'round'; g.stroke();
+
+    const last = pts.at(-1);
+    g.beginPath(); g.arc(x(last.t), y(last.w), 4, 0, Math.PI * 2); g.fillStyle = accent; g.fill();
+
+    $('chart-peak').textContent = 'peak ' + (peak >= 1000 ? (peak / 1000).toFixed(2) + ' kW' : Math.round(peak) + ' W');
+  }
+  function niceMax(v) {
+    const steps = [500, 1000, 2000, 3000, 4000, 5000, 8000, 10000, 15000, 20000];
+    return steps.find(s => s >= v * 1.1) || Math.ceil(v * 1.1 / 5000) * 5000;
+  }
+
+  // ---------- Scheduling ----------
+  function schedule(ms) {
+    clearTimeout(s.timer);
+    s.nextAt = Date.now() + ms;
+    s.timer = setTimeout(tick, ms);
+  }
+
+  async function tick() {
+    if (document.hidden) return; // resumes on visibilitychange
+    try {
+      if (s.mode === 'demo') {
+        const now = Date.now();
+        s.points.push({ t: now, w: demoWatts(now) }); trim(); showReading(s.points.at(-1).w, now);
+        schedule(POLL_MS);
+      } else if (s.mode === 'halfhour') {
+        await pollHalfHourly(); schedule(30 * 60_000);
+      } else {
+        await pollLive();
+        if (Date.now() - (s.lastTotal || 0) > 5 * 60_000) { s.lastTotal = Date.now(); todayTotal().catch(() => {}); }
+        if (s.mode !== 'live') { s.mode = 'live'; setStatus('live', 'Live'); notice(); }
+        schedule(POLL_MS);
+      }
+    } catch (e) {
+      setStatus('error', 'Retrying');
+      notice('err', `<b>Last update failed.</b> ${escapeHtml(e.message)}`);
+      if (s.mode !== 'halfhour') s.mode = 'error';
+      schedule(POLL_MS);
+    }
+  }
+
+  async function connect() {
+    clearTimeout(s.timer);
+    if (!s.key) { startDemo(); schedule(POLL_MS); return; }
+    setStatus('demo', 'Connecting');
+    notice('warn', 'Connecting to your Octopus account…');
+    s.token = null; s.deviceId = null; s.mpan = null; s.serial = null; s.points = [];
+    try {
+      await discover();
+      if (s.deviceId) {
+        await backfill();
+        s.mode = 'live'; setStatus('live', 'Live'); notice();
+        s.lastTotal = Date.now(); todayTotal().catch(() => {});
+        await tick();
+      } else {
+        s.mode = 'halfhour'; setStatus('halfhour', 'Half-hourly');
+        $('chart-title').textContent = 'Last 48 hours (half-hourly)';
+        $('avg').previousElementSibling.textContent = 'Avg';
+        notice('warn', '<b>No Octopus Home Mini found.</b> Live 30-second readings need a Home Mini, which Octopus sends free on request. Until then this shows your half-hourly smart meter data, which usually arrives a day late.');
+        await tick();
+      }
+    } catch (e) {
+      s.mode = 'error'; setStatus('error', 'Not connected');
+      notice('err', `<b>Could not connect.</b> ${escapeHtml(e.message)} Check your API key in Settings.`);
+    }
+  }
+
+  function escapeHtml(t) { return String(t).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c])); }
+
+  // Countdown ring
+  setInterval(() => {
+    const left = Math.max(0, s.nextAt - Date.now());
+    const total = s.mode === 'halfhour' ? 30 * 60_000 : POLL_MS;
+    $('next').textContent = left > 60_000 ? `next in ${Math.ceil(left / 60_000)}m` : `next in ${Math.ceil(left / 1000)}s`;
+    $('ring').style.strokeDashoffset = (50.27 * (1 - left / total)).toFixed(2);
+  }, 1000);
+
+  // Pause when hidden, refresh straight away when shown
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) { requestWakeLock(); tick(); }
+  });
+
+  // Keep the screen awake while watching
+  let wakeLock = null;
+  async function requestWakeLock() {
+    try { if ('wakeLock' in navigator && !wakeLock) { wakeLock = await navigator.wakeLock.request('screen'); wakeLock.addEventListener('release', () => wakeLock = null); } } catch {}
+  }
+
+  // Theme changes and resizes redraw the chart
+  window.addEventListener('resize', draw);
+  matchMedia('(prefers-color-scheme: dark)').addEventListener?.('change', draw);
+
+  // Settings
+  const sheet = $('sheet');
+  $('open-settings').onclick = () => { $('api-key').value = s.key; $('account').value = s.account; sheet.hidden = false; };
+  $('close-settings').onclick = () => { sheet.hidden = true; };
+  sheet.addEventListener('click', e => { if (e.target === sheet) sheet.hidden = true; });
+  $('settings-form').addEventListener('submit', e => {
+    e.preventDefault();
+    s.key = $('api-key').value.trim();
+    s.account = $('account').value.trim().toUpperCase();
+    store.set('hp.key', s.key);
+    if (s.account) store.set('hp.account', s.account); else store.del('hp.account');
+    sheet.hidden = true;
+    connect();
+  });
+  $('forget').onclick = () => {
+    store.del('hp.key'); store.del('hp.account');
+    s.key = ''; s.account = ''; sheet.hidden = true;
+    $('chart-title').textContent = 'Last 30 minutes';
+    connect();
+  };
+
+  requestWakeLock();
+  connect();
+})();
+</script>
+</body>
+</html>
