@@ -95,7 +95,7 @@ canvas { display: block; width: 100%; height: 200px; }
 .stat { padding: 12px; border-radius: 12px; background: var(--surface); border: 1px solid var(--line); min-width: 0; }
 .stat .k { font: 500 11px var(--font-data); text-transform: uppercase; letter-spacing: .06em; color: var(--muted); }
 .stat .v { font: 600 20px var(--font-display); font-variant-numeric: tabular-nums; margin-top: 2px; overflow-wrap: anywhere; }
-.stat .v small { font: 500 12px var(--font-body); color: var(--muted); margin-left: 2px; }
+.stat .v small { display: block; font: 500 12px var(--font-body); color: var(--muted); }
 
 .notice { font-size: 14px; padding: 12px 14px; border-radius: 12px; border: 1px solid var(--line); background: var(--surface); }
 .notice.warn { border-color: color-mix(in srgb, var(--warn) 50%, var(--line)); }
@@ -114,7 +114,7 @@ canvas { display: block; width: 100%; height: 200px; }
 .field { display: flex; flex-direction: column; gap: 6px; }
 .field label { font: 600 13px var(--font-body); }
 .field input {
-  font: 15px var(--font-data); padding: 12px; border-radius: 10px; border: 1px solid var(--line);
+  font: 16px var(--font-data); padding: 12px; border-radius: 10px; border: 1px solid var(--line);
   background: var(--bg); color: var(--fg); width: 100%;
 }
 .field .hint { font-size: 12px; color: var(--muted); }
@@ -252,14 +252,17 @@ canvas { display: block; width: 100%; height: 200px; }
       }
     }`, { n: s.account });
     const agreements = d.account?.electricityAgreements || [];
+    s.deviceIds = [];
     for (const a of agreements) {
       for (const m of a.meterPoint?.meters || []) {
+        const ids = (m.smartDevices || []).map(x => x.deviceId).filter(Boolean);
+        if (ids.length && !s.deviceIds.length) { s.mpan = a.meterPoint.mpan; s.serial = m.serialNumber; }
         s.mpan ??= a.meterPoint.mpan; s.serial ??= m.serialNumber;
-        const dev = (m.smartDevices || []).find(x => x.deviceId);
-        if (dev) { s.deviceId = dev.deviceId; s.mpan = a.meterPoint.mpan; s.serial = m.serialNumber; return; }
+        s.deviceIds.push(...ids);
       }
     }
     if (!s.mpan) throw new Error('No active electricity meter found on this account.');
+    s.deviceId = s.deviceIds[0] || null;
   }
 
   const TELEMETRY = `query($d: String!, $s: DateTime, $e: DateTime, $g: TelemetryGrouping) {
@@ -267,6 +270,33 @@ canvas { display: block; width: 100%; height: 200px; }
       readAt demand consumption consumptionDelta
     }
   }`;
+  const GROUP_SECONDS = { TEN_SECONDS: 10, ONE_MINUTE: 60, FIFTEEN_MINUTES: 900, THIRTY_MINUTES: 1800 };
+
+  // Octopus wants plain ISO times without milliseconds
+  const iso = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
+
+  async function telemetry(deviceId, fromMs, toMs, grouping) {
+    const d = await gql(TELEMETRY, { d: deviceId, s: iso(fromMs), e: iso(toMs), g: grouping });
+    return (d.smartMeterTelemetry || []).filter(r => r && r.readAt);
+  }
+
+  // Recent readings, trying 10-second then 1-minute grouping
+  async function recent(deviceId, windowMs) {
+    const now = Date.now();
+    for (const g of ['TEN_SECONDS', 'ONE_MINUTE']) {
+      const rows = await telemetry(deviceId, now - windowMs, now, g);
+      if (rows.length) return rows.map(r => ({ r, sec: GROUP_SECONDS[g] }));
+    }
+    return [];
+  }
+
+  // Use whichever device on the meter actually returns readings
+  async function pickDevice() {
+    for (const id of s.deviceIds) {
+      if ((await recent(id, 60 * 60_000)).length) { s.deviceId = id; return true; }
+    }
+    return false;
+  }
 
   function toWatts(r, seconds) {
     if (r.demand != null && r.demand !== '') return Number(r.demand);
@@ -274,31 +304,34 @@ canvas { display: block; width: 100%; height: 200px; }
     return null;
   }
 
-  async function backfill() {
-    const end = new Date(), start = new Date(Date.now() - WINDOW_MS);
-    const d = await gql(TELEMETRY, { d: s.deviceId, s: start.toISOString(), e: end.toISOString(), g: 'TEN_SECONDS' });
-    s.points = (d.smartMeterTelemetry || [])
-      .map(r => ({ t: Date.parse(r.readAt), w: toWatts(r, 10) }))
-      .filter(p => p.w != null && !isNaN(p.t))
+  function toPoints(rows) {
+    return rows
+      .map(({ r, sec }) => ({ t: Date.parse(r.readAt), w: toWatts(r, sec) }))
+      .filter(p => p.w != null && !isNaN(p.w) && !isNaN(p.t))
       .sort((a, b) => a.t - b.t);
   }
 
+  async function backfill() {
+    s.points = toPoints(await recent(s.deviceId, WINDOW_MS));
+  }
+
   async function pollLive() {
-    const d = await gql(TELEMETRY, { d: s.deviceId });
-    const list = d.smartMeterTelemetry || [];
-    const r = list[list.length - 1];
-    if (!r) throw new Error('Your Home Mini sent no reading. Check it is plugged in and online.');
-    const p = { t: Date.parse(r.readAt), w: toWatts(r, 10) };
-    if (p.w != null && !s.points.some(x => x.t === p.t)) s.points.push(p);
+    const rows = await recent(s.deviceId, 5 * 60_000);
+    const last = rows.sort((a, b) => Date.parse(a.r.readAt) - Date.parse(b.r.readAt)).at(-1);
+    if (!last) throw new Error(`Octopus has no readings from your Home Mini in the last 5 minutes (checked ${s.deviceIds.length} device${s.deviceIds.length === 1 ? '' : 's'}). If you only just set it up, readings can take a while to start appearing.`);
+    const [p] = toPoints([last]);
+    if (!p) throw new Error('Octopus sent a reading without a usage figure.');
+    if (!s.points.some(x => x.t === p.t)) s.points.push(p);
     trim();
     showReading(p.w, p.t);
-    if (r.consumption != null) setStat('meter-read', (Number(r.consumption) / 1000).toFixed(1), 'kWh');
+    if (last.r.consumption != null) setStat('meter-read', (Number(last.r.consumption) / 1000).toFixed(1), 'kWh');
   }
 
   async function todayTotal() {
     const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-    const d = await gql(TELEMETRY, { d: s.deviceId, s: midnight.toISOString(), e: new Date().toISOString(), g: 'THIRTY_MINUTES' });
-    const wh = (d.smartMeterTelemetry || []).reduce((sum, r) => sum + (Number(r.consumptionDelta) || 0), 0);
+    const rows = await telemetry(s.deviceId, midnight.getTime(), Date.now(), 'THIRTY_MINUTES');
+    if (!rows.length) return;
+    const wh = rows.reduce((sum, r) => sum + (Number(r.consumptionDelta) || 0), 0);
     setStat('today-kwh', (wh / 1000).toFixed(2), 'kWh');
   }
 
@@ -446,15 +479,29 @@ canvas { display: block; width: 100%; height: 200px; }
     }
   }
 
+  function clearDisplay() {
+    s.points = [];
+    $('watts').textContent = '–'; $('watts-unit').textContent = 'W';
+    $('read-at').textContent = '–'; $('chart-peak').textContent = 'peak –';
+    $('chart-title').textContent = 'Last 30 minutes';
+    $('today-kwh').previousElementSibling.textContent = 'Today';
+    $('avg').previousElementSibling.textContent = 'Avg 30 min';
+    for (const id of ['today-kwh', 'meter-read']) setStat(id, '–', 'kWh');
+    setStat('avg', '–', 'W');
+    draw();
+  }
+
   async function connect() {
     clearTimeout(s.timer);
+    clearDisplay();
     if (!s.key) { startDemo(); schedule(POLL_MS); return; }
     setStatus('demo', 'Connecting');
     notice('warn', 'Connecting to your Octopus account…');
-    s.token = null; s.deviceId = null; s.mpan = null; s.serial = null; s.points = [];
+    s.token = null; s.deviceId = null; s.deviceIds = []; s.mpan = null; s.serial = null; s.points = [];
     try {
       await discover();
       if (s.deviceId) {
+        await pickDevice();
         await backfill();
         s.mode = 'live'; setStatus('live', 'Live'); notice();
         s.lastTotal = Date.now(); todayTotal().catch(() => {});
@@ -484,7 +531,10 @@ canvas { display: block; width: 100%; height: 200px; }
 
   // Pause when hidden, refresh straight away when shown
   document.addEventListener('visibilitychange', () => {
-    if (!document.hidden) { requestWakeLock(); tick(); }
+    if (document.hidden) { s.hiddenAt = Date.now(); return; }
+    requestWakeLock();
+    if (s.mode === 'live' && Date.now() - (s.hiddenAt || 0) > 60_000) backfill().catch(() => {}).finally(tick);
+    else tick();
   });
 
   // Keep the screen awake while watching
