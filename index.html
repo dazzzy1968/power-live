@@ -138,7 +138,7 @@ canvas { display: block; width: 100%; height: 200px; }
   </header>
 
   <section class="hero" aria-live="polite">
-    <span class="label">Using right now</span>
+    <span class="label" id="hero-label">Using right now</span>
     <div class="watts"><span class="num" id="watts">–</span><span class="unit" id="watts-unit">W</span></div>
     <div class="meta-row">
       <span class="pill" id="status" data-state="demo"><span class="dot"></span><span id="status-text">Demo data</span></span>
@@ -163,7 +163,7 @@ canvas { display: block; width: 100%; height: 200px; }
     <div class="stat"><div class="k">Meter</div><div class="v" id="meter-read">–<small>kWh</small></div></div>
   </section>
 
-  <p class="foot">Updates every 30 seconds while this screen is open.<br><span id="version">Version 1.4</span></p>
+  <p class="foot">Updates every 30 seconds while this screen is open.<br><span id="version">Version 1.5</span></p>
 </main>
 
 <div class="sheet-wrap" id="sheet" hidden>
@@ -193,7 +193,7 @@ canvas { display: block; width: 100%; height: 200px; }
 (() => {
   const GQL = 'https://api.octopus.energy/v1/graphql/';
   const REST = 'https://api.octopus.energy/v1';
-  const VERSION = '1.4';
+  const VERSION = '1.5';
   const POLL_MS = 30_000;
   const WINDOW_MS = 30 * 60_000;
 
@@ -277,7 +277,7 @@ canvas { display: block; width: 100%; height: 200px; }
       readAt demand consumption consumptionDelta
     }
   }`;
-  const GROUP_SECONDS = { TEN_SECONDS: 10, ONE_MINUTE: 60, FIFTEEN_MINUTES: 900, THIRTY_MINUTES: 1800 };
+  const GROUP_SECONDS = { TEN_SECONDS: 10, ONE_MINUTE: 60, FIVE_MINUTES: 300 };
 
   // Octopus wants plain ISO times without milliseconds
   const iso = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -336,7 +336,7 @@ canvas { display: block; width: 100%; height: 200px; }
 
   async function todayTotal() {
     const midnight = new Date(); midnight.setHours(0, 0, 0, 0);
-    const rows = await telemetry(s.deviceId, midnight.getTime(), Date.now(), 'THIRTY_MINUTES');
+    const rows = await telemetry(s.deviceId, midnight.getTime(), Date.now(), 'FIVE_MINUTES');
     if (!rows.length) return;
     const wh = rows.reduce((sum, r) => sum + (Number(r.consumptionDelta) || 0), 0);
     setStat('today-kwh', (wh / 1000).toFixed(2), 'kWh');
@@ -357,6 +357,7 @@ canvas { display: block; width: 100%; height: 200px; }
     const lastDay = rows.slice(-48).reduce((a, r) => a + r.consumption, 0);
     setStat('today-kwh', lastDay.toFixed(2), 'kWh');
     $('today-kwh').previousElementSibling.textContent = 'Last 24 h';
+    $('hero-label').textContent = 'Average, latest half hour';
   }
 
   // ---------- Demo data (shown until a key is saved) ----------
@@ -391,12 +392,12 @@ canvas { display: block; width: 100%; height: 200px; }
     if (w == null || isNaN(w)) return;
     if (w >= 10_000) { $('watts').textContent = (w / 1000).toFixed(1); $('watts-unit').textContent = 'kW'; }
     else { $('watts').textContent = Math.round(w).toLocaleString(); $('watts-unit').textContent = 'W'; }
-    const timeLabel = s.mode === 'halfhour'
+    const timeLabel = (s.mode === 'halfhour' || s.mode === 'waiting')
       ? 'half hour from ' + new Date(t).toLocaleString([], { weekday: 'short', hour: '2-digit', minute: '2-digit' })
       : 'read ' + fmtTime(t);
     $('read-at').textContent = timeLabel;
     const recent = s.points.filter(p => p.t > Date.now() - WINDOW_MS);
-    if (recent.length && s.mode !== 'halfhour') {
+    if (recent.length && s.mode === 'live') {
       const avg = recent.reduce((a, p) => a + p.w, 0) / recent.length;
       setStat('avg', Math.round(avg).toLocaleString(), 'W');
     }
@@ -472,6 +473,11 @@ canvas { display: block; width: 100%; height: 200px; }
         schedule(POLL_MS);
       } else if (s.mode === 'halfhour') {
         await pollHalfHourly(); schedule(30 * 60_000);
+      } else if (s.mode === 'waiting') {
+        // Check for Home Mini readings every 30 s; refresh half-hourly data every 30 min meanwhile
+        if ((await recent(s.deviceId, 5 * 60_000)).length) { await startLive(); return; }
+        if (Date.now() - (s.lastHalfHour || 0) > 30 * 60_000) { s.lastHalfHour = Date.now(); await pollHalfHourly(); }
+        schedule(POLL_MS);
       } else {
         await pollLive();
         if (Date.now() - (s.lastTotal || 0) > 5 * 60_000) { s.lastTotal = Date.now(); todayTotal().catch(() => {}); }
@@ -486,10 +492,19 @@ canvas { display: block; width: 100%; height: 200px; }
     }
   }
 
+  async function startLive() {
+    clearDisplay();
+    await backfill();
+    s.mode = 'live'; setStatus('live', 'Live'); notice();
+    s.lastTotal = Date.now(); todayTotal().catch(() => {});
+    await tick();
+  }
+
   function clearDisplay() {
     s.points = [];
     $('watts').textContent = '–'; $('watts-unit').textContent = 'W';
     $('read-at').textContent = '–'; $('chart-peak').textContent = 'peak –';
+    $('hero-label').textContent = 'Using right now';
     $('chart-title').textContent = 'Last 30 minutes';
     $('today-kwh').previousElementSibling.textContent = 'Today';
     $('avg').previousElementSibling.textContent = 'Avg 30 min';
@@ -507,12 +522,16 @@ canvas { display: block; width: 100%; height: 200px; }
     s.token = null; s.deviceId = null; s.deviceIds = []; s.mpan = null; s.serial = null; s.points = [];
     try {
       await discover();
-      if (s.deviceId) {
-        await pickDevice();
-        await backfill();
-        s.mode = 'live'; setStatus('live', 'Live'); notice();
-        s.lastTotal = Date.now(); todayTotal().catch(() => {});
-        await tick();
+      if (s.deviceId && await pickDevice()) {
+        await startLive();
+      } else if (s.deviceId) {
+        s.mode = 'waiting'; setStatus('halfhour', 'Waiting for Home Mini');
+        $('chart-title').textContent = 'Last 48 hours (half-hourly)';
+        $('avg').previousElementSibling.textContent = 'Avg';
+        notice('warn', '<b>Your Home Mini isn’t sending readings to Octopus yet.</b> Until it does, this shows your half-hourly smart meter data, which usually arrives a day late. The app checks every 30 seconds and switches to live readings by itself.');
+        s.lastHalfHour = Date.now();
+        await pollHalfHourly();
+        schedule(POLL_MS);
       } else {
         s.mode = 'halfhour'; setStatus('halfhour', 'Half-hourly');
         $('chart-title').textContent = 'Last 48 hours (half-hourly)';
@@ -598,9 +617,9 @@ canvas { display: block; width: 100%; height: 200px; }
       ['Latest, no time range', {}],
       ['Last hour, 10 sec', { s: iso(now - 3600e3), e: iso(now), g: 'TEN_SECONDS' }],
       ['Last hour, 1 min', { s: iso(now - 3600e3), e: iso(now), g: 'ONE_MINUTE' }],
-      ['Last 24 h, 30 min', { s: iso(now - 864e5), e: iso(now), g: 'THIRTY_MINUTES' }],
-      ['Last 24 h, +00:00 times', { s: plus(now - 864e5), e: plus(now), g: 'THIRTY_MINUTES' }],
-      ['Last 7 days, 1 hour', { s: iso(now - 7 * 864e5), e: iso(now), g: 'ONE_HOUR' }],
+      ['Last 24 h, 5 min', { s: iso(now - 864e5), e: iso(now), g: 'FIVE_MINUTES' }],
+      ['Last 24 h, +00:00 times', { s: plus(now - 864e5), e: plus(now), g: 'FIVE_MINUTES' }],
+      ['Last 7 days, 5 min', { s: iso(now - 7 * 864e5), e: iso(now), g: 'FIVE_MINUTES' }],
     ];
     for (const id of s.deviceIds) {
       log(`\nDevice ${mask(id)}`);
