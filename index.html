@@ -124,6 +124,10 @@ canvas { display: block; width: 100%; height: 200px; }
 .btn.ghost { background: transparent; color: var(--fg); border: 1px solid var(--line); }
 .btn.danger { background: transparent; color: var(--bad); border: 1px solid var(--line); }
 .foot { color: var(--muted); font-size: 12px; text-align: center; }
+.diag {
+  margin: 0; padding: 12px; border-radius: 10px; background: var(--bg); border: 1px solid var(--line);
+  font: 12px/1.5 var(--font-data); white-space: pre-wrap; overflow-wrap: anywhere; color: var(--fg);
+}
 </style>
 </head>
 <body>
@@ -159,7 +163,7 @@ canvas { display: block; width: 100%; height: 200px; }
     <div class="stat"><div class="k">Meter</div><div class="v" id="meter-read">–<small>kWh</small></div></div>
   </section>
 
-  <p class="foot">Updates every 30 seconds while this screen is open.</p>
+  <p class="foot">Updates every 30 seconds while this screen is open.<br><span id="version">Version 1.4</span></p>
 </main>
 
 <div class="sheet-wrap" id="sheet" hidden>
@@ -179,6 +183,8 @@ canvas { display: block; width: 100%; height: 200px; }
       <button class="btn primary" type="submit" id="save">Save and connect</button>
       <button class="btn ghost" type="button" id="close-settings">Close</button>
     </div>
+    <button class="btn ghost" type="button" id="run-check">Run connection check</button>
+    <pre class="diag" id="diag" hidden></pre>
     <button class="btn danger" type="button" id="forget">Forget key and show demo</button>
   </form>
 </div>
@@ -187,6 +193,7 @@ canvas { display: block; width: 100%; height: 200px; }
 (() => {
   const GQL = 'https://api.octopus.energy/v1/graphql/';
   const REST = 'https://api.octopus.energy/v1';
+  const VERSION = '1.4';
   const POLL_MS = 30_000;
   const WINDOW_MS = 30 * 60_000;
 
@@ -568,6 +575,56 @@ canvas { display: block; width: 100%; height: 200px; }
     connect();
   };
 
+  $('version').textContent = 'Version ' + VERSION;
+  // Connection check: asks Octopus several ways and shows what comes back
+  const mask = v => v ? String(v).replace(/^(.{4}).+(.{4})$/, '$1…$2') : '(none)';
+  async function connectionCheck() {
+    const lines = [];
+    const log = t => { lines.push(t); $('diag').textContent = lines.join('\n'); };
+    $('diag').hidden = false;
+    log(`Home Power Live ${VERSION}, check at ${new Date().toLocaleTimeString()}`);
+    if (!s.key) { log('No API key saved. Paste one above and tap Save and connect.'); return; }
+    try {
+      s.token = null; await token(); log('API key accepted by Octopus: yes');
+      if (!s.mpan) await discover();
+      log(`Account: ${s.account}`);
+      log(`Electricity meter: ${mask(s.mpan)} / ${mask(s.serial)}`);
+      log(`Smart devices on meter: ${s.deviceIds.length}`);
+    } catch (e) { log('Stopped: ' + e.message); return; }
+
+    const now = Date.now();
+    const plus = ms => new Date(ms).toISOString().replace(/\.\d{3}Z$/, '+00:00');
+    const tries = [
+      ['Latest, no time range', {}],
+      ['Last hour, 10 sec', { s: iso(now - 3600e3), e: iso(now), g: 'TEN_SECONDS' }],
+      ['Last hour, 1 min', { s: iso(now - 3600e3), e: iso(now), g: 'ONE_MINUTE' }],
+      ['Last 24 h, 30 min', { s: iso(now - 864e5), e: iso(now), g: 'THIRTY_MINUTES' }],
+      ['Last 24 h, +00:00 times', { s: plus(now - 864e5), e: plus(now), g: 'THIRTY_MINUTES' }],
+      ['Last 7 days, 1 hour', { s: iso(now - 7 * 864e5), e: iso(now), g: 'ONE_HOUR' }],
+    ];
+    for (const id of s.deviceIds) {
+      log(`\nDevice ${mask(id)}`);
+      for (const [label, v] of tries) {
+        try {
+          const rows = (await gql(TELEMETRY, { d: id, ...v })).smartMeterTelemetry || [];
+          const newest = rows.map(r => r.readAt).filter(Boolean).sort().at(-1);
+          log(`  ${label}: ${rows.length} readings${newest ? ', newest ' + newest : ''}`);
+        } catch (e) { log(`  ${label}: error: ${e.message}`); }
+      }
+    }
+    if (s.mpan && s.serial) {
+      try {
+        const res = await fetch(`${REST}/electricity-meter-points/${s.mpan}/meters/${s.serial}/consumption/?page_size=1`,
+          { headers: { Authorization: 'Basic ' + btoa(s.key + ':') } });
+        const j = await res.json();
+        log(`\nHalf-hourly meter data: ${res.status}, newest ${j.results?.[0]?.interval_start || 'none'}`);
+      } catch (e) { log('\nHalf-hourly meter data: could not fetch (' + e.message + ')'); }
+    }
+    log('\nCheck finished. Screenshot this and send it to Claude.');
+  }
+  $('run-check').onclick = () => connectionCheck();
+
+  $('version').textContent = 'Version ' + VERSION;
   requestWakeLock();
   connect();
 })();
